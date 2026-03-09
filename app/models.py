@@ -9,6 +9,8 @@ from app.database import Base
 
 
 class User(Base):
+    """Application user with one-to-one wallet relationship."""
+
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, index=True)
@@ -20,6 +22,8 @@ class User(Base):
 
 
 class Wallet(Base):
+    """Wallet owned by a single user, with running balance."""
+
     __tablename__ = "wallets"
     __table_args__ = (
         CheckConstraint("balance >= 0", name="ck_wallets_balance_non_negative"),
@@ -38,11 +42,15 @@ class Wallet(Base):
 
 
 class EntryType(str, Enum):
+    """Allowed ledger entry directions."""
+
     CREDIT = "credit"
     DEBIT = "debit"
 
 
 class LedgerEntry(Base):
+    """Immutable transaction record for wallet credit/debit operations."""
+
     __tablename__ = "ledger_entries"
     __table_args__ = (
         CheckConstraint("amount > 0", name="ck_ledger_entries_amount_positive"),

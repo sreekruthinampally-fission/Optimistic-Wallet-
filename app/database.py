@@ -1,10 +1,17 @@
+import logging
+
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 
 class Base(DeclarativeBase):
+    """Base class for all SQLAlchemy ORM models."""
+
     pass
 
 
@@ -20,28 +27,22 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
-def get_db() -> Session:
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-def init_db() -> None:
-    # Import models before create_all so metadata is fully registered.
-    from app import models  # noqa: F401
-
-    Base.metadata.create_all(bind=engine)
+def _ensure_users_password_hash_column() -> None:
+    """Backfill legacy `users.password_hash` column when running against older schemas."""
     inspector = inspect(engine)
-    if "users" in inspector.get_table_names():
-        columns = {column["name"] for column in inspector.get_columns("users")}
-        if "password_hash" not in columns:
-            with engine.begin() as connection:
-                connection.execute(
-                    text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''")
-                )
-    # Add important constraints/indexes for existing databases created before hardening.
+    if "users" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("users")}
+    if "password_hash" in columns:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''"))
+
+
+def _apply_postgres_constraints_and_indexes() -> None:
+    """Apply idempotent hardening DDL for constraints and query-performance indexes."""
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -102,3 +103,45 @@ def init_db() -> None:
                 """
             )
         )
+
+
+def get_db() -> Session:
+    """Yield a request-scoped database session with automatic rollback/close."""
+    db = SessionLocal()
+    logger.debug("Database session opened")
+    try:
+        yield db
+    except Exception:
+        logger.exception("Database session rollback triggered due to request failure")
+        db.rollback()
+        raise
+    finally:
+        db.close()
+        logger.debug("Database session closed")
+
+
+def init_db() -> None:
+    """Create tables and apply safety constraints/indexes for existing databases."""
+    logger.info("Starting database schema initialization")
+    try:
+        # Import models before create_all so metadata is fully registered.
+        from app import models  # noqa: F401
+
+        Base.metadata.create_all(bind=engine)
+        _ensure_users_password_hash_column()
+        _apply_postgres_constraints_and_indexes()
+        logger.info("Database schema initialization finished")
+    except SQLAlchemyError:
+        logger.exception("Database initialization failed")
+        raise
+
+
+def check_db_connection() -> bool:
+    """Return True when database responds to a lightweight probe query."""
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return True
+    except SQLAlchemyError:
+        logger.exception("Database connectivity check failed")
+        return False

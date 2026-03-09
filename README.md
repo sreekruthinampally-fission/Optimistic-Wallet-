@@ -106,6 +106,7 @@ pytest -q
 - `ENVIRONMENT`
 - `DEBUG`
 - `LOG_LEVEL`
+- `AUTO_INIT_DB` (set `false` in production)
 - `DATABASE_URL`
 - `DB_POOL_SIZE`
 - `DB_MAX_OVERFLOW`
@@ -119,3 +120,4 @@ pytest -q
 ## Notes
 - Credit/debit are wrapped in DB transactions.
 - Wallet row is locked during update (`SELECT ... FOR UPDATE`) to prepare for concurrent safety in next phase.
+- `/healthz` verifies database connectivity and returns `503` when DB is unavailable.

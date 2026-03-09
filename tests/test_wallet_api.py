@@ -155,6 +155,32 @@ def test_wallet_routes_no_longer_accept_user_id_path(client):
     assert response.status_code == 404
 
 
+def test_not_found_error_includes_request_metadata(client):
+    response = client.get("/route-that-does-not-exist")
+    assert response.status_code == 404
+    body = response.json()
+    assert body["path"] == "/route-that-does-not-exist"
+    assert isinstance(body["request_id"], str) and body["request_id"]
+    assert isinstance(body["timestamp"], str) and body["timestamp"]
+    assert response.headers["X-Request-Id"] == body["request_id"]
+
+
+def test_validation_error_includes_errors_and_request_metadata(client):
+    response = client.post("/auth/register", json={"email": "bad-email", "password": "StrongPass123!"})
+    assert response.status_code == 422
+    body = response.json()
+    assert body["detail"] == "Validation failed"
+    assert isinstance(body["errors"], list) and body["errors"]
+    assert body["path"] == "/auth/register"
+    assert isinstance(body["request_id"], str) and body["request_id"]
+
+
+def test_invalid_auth_scheme_is_rejected(client):
+    response = client.post("/wallets", headers={"Authorization": "Basic abc123"})
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid authorization scheme"
+
+
 def test_concurrent_debits_are_consistent(client):
     user_id = register_user(client, "concurrency@example.com")
     token = login_user(client, "concurrency@example.com")
