@@ -32,3 +32,9 @@ class InvalidCredentialsError(Exception):
     """Raised when login credentials are invalid."""
 
     pass
+
+
+class ConcurrencyConflictError(Exception):
+    """Raised when optimistic concurrency retries are exhausted."""
+
+    pass

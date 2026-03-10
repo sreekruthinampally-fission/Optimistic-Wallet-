@@ -236,7 +236,7 @@ def test_concurrent_debits_are_consistent(client):
             failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
 
     final_balance = Decimal(balance_response.json()["balance"]).quantize(Decimal("0.00"))
-    print("PHASE2_CONCURRENCY_CHECK: PASS")
+    print("CONCURRENCY_CHECK: PASS")
     print(
         "successes="
         f"{successful_debits} failures={failed_debits} final_balance={final_balance} "

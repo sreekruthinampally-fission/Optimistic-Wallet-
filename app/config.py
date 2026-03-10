@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 60
     password_hash_iterations: int = 120_000
+    auth_rate_limit_enabled: bool = True
+    auth_rate_limit_max_attempts: int = 10
+    auth_rate_limit_window_seconds: int = 60
 
     @field_validator("debug", mode="before")
     @classmethod
@@ -75,6 +78,22 @@ class Settings(BaseSettings):
         """Enforce a minimum PBKDF2 work factor."""
         if value < 100_000:
             raise ValueError("PASSWORD_HASH_ITERATIONS must be at least 100000")
+        return value
+
+    @field_validator("auth_rate_limit_max_attempts")
+    @classmethod
+    def validate_auth_rate_limit_max_attempts(cls, value: int) -> int:
+        """Ensure auth rate limit attempts are positive."""
+        if value <= 0:
+            raise ValueError("AUTH_RATE_LIMIT_MAX_ATTEMPTS must be greater than 0")
+        return value
+
+    @field_validator("auth_rate_limit_window_seconds")
+    @classmethod
+    def validate_auth_rate_limit_window_seconds(cls, value: int) -> int:
+        """Ensure auth rate limit window is positive."""
+        if value <= 0:
+            raise ValueError("AUTH_RATE_LIMIT_WINDOW_SECONDS must be greater than 0")
         return value
 
     @field_validator("environment")

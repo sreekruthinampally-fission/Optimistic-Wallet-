@@ -2,10 +2,15 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import CheckConstraint, DateTime, Enum as SqlEnum, ForeignKey, Numeric, String, func
+from sqlalchemy import CheckConstraint, DateTime, Enum as SqlEnum, ForeignKey, Integer, Numeric, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+
+def _wallet_version_generator(current_version: int | None) -> int:
+    """Increment wallet version for optimistic concurrency control."""
+    return (current_version or 0) + 1
 
 
 class User(Base):
@@ -32,10 +37,16 @@ class Wallet(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
     balance: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("0.00"))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+    __mapper_args__ = {
+        "version_id_col": version,
+        "version_id_generator": _wallet_version_generator,
+    }
 
     ledger_entries = relationship("LedgerEntry", back_populates="wallet", cascade="all,delete-orphan")
     user = relationship("User", back_populates="wallet")

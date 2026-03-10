@@ -41,6 +41,20 @@ def _ensure_users_password_hash_column() -> None:
         connection.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''"))
 
 
+def _ensure_wallets_version_column() -> None:
+    """Backfill `wallets.version` column for optimistic concurrency control."""
+    inspector = inspect(engine)
+    if "wallets" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("wallets")}
+    if "version" in columns:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE wallets ADD COLUMN version INTEGER NOT NULL DEFAULT 0"))
+
+
 def _apply_postgres_constraints_and_indexes() -> None:
     """Apply idempotent hardening DDL for constraints and query-performance indexes."""
     with engine.begin() as connection:
@@ -129,6 +143,7 @@ def init_db() -> None:
 
         Base.metadata.create_all(bind=engine)
         _ensure_users_password_hash_column()
+        _ensure_wallets_version_column()
         _apply_postgres_constraints_and_indexes()
         logger.info("Database schema initialization finished")
     except SQLAlchemyError:

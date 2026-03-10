@@ -26,3 +26,4 @@
 - Services should not return raw dictionaries; return ORM/domain objects.
 - Money uses `Decimal` + Postgres `NUMERIC(18,2)`.
 - Ledger writes happen in the same transaction as balance updates.
+- Wallet balance updates use optimistic concurrency via a version column.

@@ -4,15 +4,18 @@ import hashlib
 import hmac
 import logging
 import secrets
+import time
 from uuid import uuid4
 
 from jose import JWTError, jwt
 from sqlalchemy import func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.config import settings
 from app.exceptions import (
+    ConcurrencyConflictError,
     InsufficientFundsError,
     InvalidCredentialsError,
     UserAlreadyExistsError,
@@ -104,6 +107,10 @@ class UserService:
                 raise UserAlreadyExistsError(f"User already exists for email '{normalized_email}'")
             db.add(user)
             db.commit()
+        except IntegrityError:
+            db.rollback()
+            logger.warning("User registration conflict (db constraint) for email=%s", normalized_email)
+            raise UserAlreadyExistsError(f"User already exists for email '{normalized_email}'")
         except SQLAlchemyError:
             db.rollback()
             logger.exception("Database error while creating user email=%s", normalized_email)
@@ -144,15 +151,18 @@ class UserService:
 class WalletService:
     """Wallet and ledger business operations."""
 
+    _MAX_OPTIMISTIC_RETRIES = 10
+    _BASE_RETRY_DELAY_SECONDS = 0.002
+
     @staticmethod
     def _normalize_amount(amount: Decimal) -> Decimal:
         """Normalize monetary value to two decimal places."""
         return amount.quantize(Decimal("0.01"))
 
     @staticmethod
-    def _get_wallet_for_update(db: Session, user_id: str) -> Wallet:
-        """Fetch wallet with row-level lock for atomic balance updates."""
-        wallet = db.execute(select(Wallet).where(Wallet.user_id == user_id).with_for_update()).scalar_one_or_none()
+    def _get_wallet_for_write(db: Session, user_id: str) -> Wallet:
+        """Fetch wallet for optimistic concurrency updates."""
+        wallet = db.execute(select(Wallet).where(Wallet.user_id == user_id)).scalar_one_or_none()
         if not wallet:
             logger.warning("Wallet operation failed because wallet not found user_id=%s", user_id)
             raise WalletNotFoundError(f"Wallet not found for user '{user_id}'")
@@ -186,6 +196,11 @@ class WalletService:
         return wallet
 
     @staticmethod
+    def _retry_delay_seconds(attempt: int) -> float:
+        """Return small backoff delay for optimistic concurrency retries."""
+        return WalletService._BASE_RETRY_DELAY_SECONDS * attempt
+
+    @staticmethod
     def create_wallet(db: Session, user_id: str) -> Wallet:
         """Create wallet for user if one does not already exist."""
         logger.info("Wallet create requested user_id=%s", user_id)
@@ -203,6 +218,10 @@ class WalletService:
             wallet = Wallet(user_id=user_id, balance=Decimal("0.00"))
             db.add(wallet)
             wallet = WalletService._commit_and_refresh_wallet(db, wallet)
+        except IntegrityError:
+            db.rollback()
+            logger.warning("Wallet create conflict (db constraint) for user_id=%s", user_id)
+            raise WalletAlreadyExistsError(f"Wallet already exists for user '{user_id}'")
         except SQLAlchemyError:
             db.rollback()
             logger.exception("Database error while creating wallet user_id=%s", user_id)
@@ -231,72 +250,97 @@ class WalletService:
         """Credit wallet balance and append matching ledger record."""
         normalized_amount = WalletService._normalize_amount(amount)
         logger.info("Wallet credit requested user_id=%s amount=%s reference=%s", user_id, normalized_amount, reference)
-        try:
-            # Row-level lock serializes concurrent updates for the same wallet.
-            wallet = WalletService._get_wallet_for_update(db, user_id)
-
-            wallet.balance += normalized_amount
-            WalletService._append_ledger_entry(
-                db,
-                wallet.id,
-                EntryType.CREDIT,
-                normalized_amount,
-                wallet.balance,
-                reference,
-            )
-            wallet = WalletService._commit_and_refresh_wallet(db, wallet)
-        except SQLAlchemyError:
-            db.rollback()
-            logger.exception("Database error while crediting wallet user_id=%s amount=%s", user_id, normalized_amount)
-            raise
-        logger.info(
-            "Wallet credited user_id=%s amount=%s balance=%s reference=%s",
-            user_id,
-            normalized_amount,
-            wallet.balance,
-            reference,
-        )
-        return wallet
+        for attempt in range(1, WalletService._MAX_OPTIMISTIC_RETRIES + 1):
+            try:
+                wallet = WalletService._get_wallet_for_write(db, user_id)
+                wallet.balance += normalized_amount
+                WalletService._append_ledger_entry(
+                    db,
+                    wallet.id,
+                    EntryType.CREDIT,
+                    normalized_amount,
+                    wallet.balance,
+                    reference,
+                )
+                wallet = WalletService._commit_and_refresh_wallet(db, wallet)
+                logger.info(
+                    "Wallet credited user_id=%s amount=%s balance=%s reference=%s",
+                    user_id,
+                    normalized_amount,
+                    wallet.balance,
+                    reference,
+                )
+                return wallet
+            except StaleDataError as exc:
+                db.rollback()
+                db.expunge_all()
+                logger.warning(
+                    "Optimistic concurrency conflict on credit user_id=%s attempt=%s",
+                    user_id,
+                    attempt,
+                )
+                if attempt >= WalletService._MAX_OPTIMISTIC_RETRIES:
+                    raise ConcurrencyConflictError("Wallet updated concurrently, please retry") from exc
+                time.sleep(WalletService._retry_delay_seconds(attempt))
+                continue
+            except SQLAlchemyError:
+                db.rollback()
+                logger.exception("Database error while crediting wallet user_id=%s amount=%s", user_id, normalized_amount)
+                raise
+        raise ConcurrencyConflictError("Wallet updated concurrently, please retry")
 
     @staticmethod
     def debit(db: Session, user_id: str, amount: Decimal, reference: str | None = None) -> Wallet:
         """Debit wallet balance atomically when sufficient funds are available."""
         normalized_amount = WalletService._normalize_amount(amount)
         logger.info("Wallet debit requested user_id=%s amount=%s reference=%s", user_id, normalized_amount, reference)
-        try:
-            # Row-level lock serializes concurrent updates for the same wallet.
-            wallet = WalletService._get_wallet_for_update(db, user_id)
-            if wallet.balance < normalized_amount:
-                logger.warning(
-                    "Debit rejected for insufficient funds user_id=%s amount=%s current_balance=%s",
+        for attempt in range(1, WalletService._MAX_OPTIMISTIC_RETRIES + 1):
+            try:
+                wallet = WalletService._get_wallet_for_write(db, user_id)
+                if wallet.balance < normalized_amount:
+                    logger.warning(
+                        "Debit rejected for insufficient funds user_id=%s amount=%s current_balance=%s",
+                        user_id,
+                        normalized_amount,
+                        wallet.balance,
+                    )
+                    raise InsufficientFundsError("Insufficient funds")
+
+                wallet.balance -= normalized_amount
+                WalletService._append_ledger_entry(
+                    db,
+                    wallet.id,
+                    EntryType.DEBIT,
+                    normalized_amount,
+                    wallet.balance,
+                    reference,
+                )
+                wallet = WalletService._commit_and_refresh_wallet(db, wallet)
+                logger.info(
+                    "Wallet debited user_id=%s amount=%s balance=%s reference=%s",
                     user_id,
                     normalized_amount,
                     wallet.balance,
+                    reference,
                 )
-                raise InsufficientFundsError("Insufficient funds")
-
-            wallet.balance -= normalized_amount
-            WalletService._append_ledger_entry(
-                db,
-                wallet.id,
-                EntryType.DEBIT,
-                normalized_amount,
-                wallet.balance,
-                reference,
-            )
-            wallet = WalletService._commit_and_refresh_wallet(db, wallet)
-        except SQLAlchemyError:
-            db.rollback()
-            logger.exception("Database error while debiting wallet user_id=%s amount=%s", user_id, normalized_amount)
-            raise
-        logger.info(
-            "Wallet debited user_id=%s amount=%s balance=%s reference=%s",
-            user_id,
-            normalized_amount,
-            wallet.balance,
-            reference,
-        )
-        return wallet
+                return wallet
+            except StaleDataError as exc:
+                db.rollback()
+                db.expunge_all()
+                logger.warning(
+                    "Optimistic concurrency conflict on debit user_id=%s attempt=%s",
+                    user_id,
+                    attempt,
+                )
+                if attempt >= WalletService._MAX_OPTIMISTIC_RETRIES:
+                    raise ConcurrencyConflictError("Wallet updated concurrently, please retry") from exc
+                time.sleep(WalletService._retry_delay_seconds(attempt))
+                continue
+            except SQLAlchemyError:
+                db.rollback()
+                logger.exception("Database error while debiting wallet user_id=%s amount=%s", user_id, normalized_amount)
+                raise
+        raise ConcurrencyConflictError("Wallet updated concurrently, please retry")
 
     @staticmethod
     def get_ledger(db: Session, user_id: str, limit: int, offset: int) -> tuple[list[LedgerEntry], int]:
