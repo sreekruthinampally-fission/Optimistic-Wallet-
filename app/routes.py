@@ -126,18 +126,17 @@ DbSession = Annotated[Session, Depends(get_db)]
 )
 def register(request: Request, payload: RegisterRequest, db: DbSession) -> UserResponse:
     """Register a new user account."""
-    normalized_email = payload.email.strip().lower()
     request_id = _request_id(request)
-    logger.info("Register request received email=%s", normalized_email)
+    logger.info("Register request received email=%s", payload.email)
     log_event(
         audit_logger,
         "info",
         "auth_register_attempt",
-        email=normalized_email,
+        email=payload.email,
         ip=_client_ip(request),
         request_id=request_id,
     )
-    _enforce_auth_rate_limit(request, normalized_email, "register")
+    _enforce_auth_rate_limit(request, payload.email, "register")
     try:
         user = UserService.create_user(db, payload.email, payload.password)
         log_event(
@@ -156,11 +155,11 @@ def register(request: Request, payload: RegisterRequest, db: DbSession) -> UserR
             audit_logger,
             "warning",
             "auth_register_conflict",
-            email=normalized_email,
+            email=payload.email,
             ip=_client_ip(request),
             request_id=request_id,
         )
-        logger.warning("Register conflict for email=%s", normalized_email)
+        logger.warning("Register conflict for email=%s", payload.email)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
@@ -172,18 +171,17 @@ def register(request: Request, payload: RegisterRequest, db: DbSession) -> UserR
 )
 def login(request: Request, payload: LoginRequest, db: DbSession) -> TokenResponse:
     """Authenticate a user and issue a bearer token."""
-    normalized_email = payload.email.strip().lower()
     request_id = _request_id(request)
-    logger.info("Login request received email=%s", normalized_email)
+    logger.info("Login request received email=%s", payload.email)
     log_event(
         audit_logger,
         "info",
         "auth_login_attempt",
-        email=normalized_email,
+        email=payload.email,
         ip=_client_ip(request),
         request_id=request_id,
     )
-    _enforce_auth_rate_limit(request, normalized_email, "login")
+    _enforce_auth_rate_limit(request, payload.email, "login")
     try:
         user = UserService.authenticate_user(db, payload.email, payload.password)
         token, expires_in = create_access_token(user.id, user.email)
@@ -203,11 +201,11 @@ def login(request: Request, payload: LoginRequest, db: DbSession) -> TokenRespon
             audit_logger,
             "warning",
             "auth_login_invalid",
-            email=normalized_email,
+            email=payload.email,
             ip=_client_ip(request),
             request_id=request_id,
         )
-        logger.warning("Invalid login attempt for email=%s", normalized_email)
+        logger.warning("Invalid login attempt for email=%s", payload.email)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
 

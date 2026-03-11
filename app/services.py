@@ -97,23 +97,22 @@ class UserService:
     @staticmethod
     def create_user(db: Session, email: str, password: str) -> User:
         """Create a unique user record with a hashed password."""
-        normalized_email = email.strip().lower()
-        logger.info("User create requested email=%s", normalized_email)
-        user = User(id=str(uuid4()), email=normalized_email, password_hash=hash_password(password))
+        logger.info("User create requested email=%s", email)
+        user = User(id=str(uuid4()), email=email, password_hash=hash_password(password))
         try:
-            existing = db.execute(select(User).where(User.email == normalized_email)).scalar_one_or_none()
+            existing = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
             if existing:
-                logger.warning("User registration conflict for email=%s", normalized_email)
-                raise UserAlreadyExistsError(f"User already exists for email '{normalized_email}'")
+                logger.warning("User registration conflict for email=%s", email)
+                raise UserAlreadyExistsError(f"User already exists for email '{email}'")
             db.add(user)
             db.commit()
         except IntegrityError:
             db.rollback()
-            logger.warning("User registration conflict (db constraint) for email=%s", normalized_email)
-            raise UserAlreadyExistsError(f"User already exists for email '{normalized_email}'")
+            logger.warning("User registration conflict (db constraint) for email=%s", email)
+            raise UserAlreadyExistsError(f"User already exists for email '{email}'")
         except SQLAlchemyError:
             db.rollback()
-            logger.exception("Database error while creating user email=%s", normalized_email)
+            logger.exception("Database error while creating user email=%s", email)
             raise
         db.refresh(user)
         logger.info("User created id=%s email=%s", user.id, user.email)
@@ -122,11 +121,10 @@ class UserService:
     @staticmethod
     def authenticate_user(db: Session, email: str, password: str) -> User:
         """Authenticate a user by email/password."""
-        normalized_email = email.strip().lower()
-        logger.info("Authentication requested email=%s", normalized_email)
-        user = db.execute(select(User).where(User.email == normalized_email)).scalar_one_or_none()
+        logger.info("Authentication requested email=%s", email)
+        user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
         if not user or not verify_password(password, user.password_hash):
-            logger.warning("Authentication failed for email=%s", normalized_email)
+            logger.warning("Authentication failed for email=%s", email)
             raise InvalidCredentialsError("Invalid email or password")
         logger.info("Authentication succeeded for user_id=%s", user.id)
         return user
